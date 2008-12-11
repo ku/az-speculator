@@ -1,26 +1,26 @@
 package AutoPagerize::Speculator;
 
 use strict;
+
+use AutoPagerize::Utils;
+
 use YAML;
 use XML::LibXML;
 
 use Lingua::LanguageGuesser;
-use LWP;
-use LWP::UserAgent;
 use Digest::MD5  qw(md5 md5_hex md5_base64);
 
 use URI;
+use utf8;
 
 use Encode;
 use AutoPagerize::Speculator::KeywordFilter::En;
+use AutoPagerize::Speculator::KeywordFilter::Ja;
 
 my $CACHEDIR = "./cache";
 
-our $UASTRING = "Mozilla/5.0 (Windows; U; Windows NT 5.1; ja; rv:1.8.1.12) Gecko/20080201 Firefox/2.0.0.12";
-our $ua;
+my $ua = AutoPagerize::Utils::ua;
 
-my $ua = LWP::UserAgent->new();
-$ua->agent($UASTRING);
 
 my $RAQUO = '»';
 my $LAQUO = '«';
@@ -32,6 +32,37 @@ sub new {
 	$class = ref $class if ref $class;
 	my $self = bless {}, $class;
 
+	$self->{opts} = shift;
+
+	$self;
+
+}
+
+sub _fetch_uri {
+	my $u = shift;
+	my $k = md5_hex($u);
+	my $filename = "$CACHEDIR/$k.html";
+	my $html;
+	if ( -e $filename ) {
+		open F, "<:utf8", $filename;
+		$html = join "", <F>;
+	} else {
+		my $res = $ua->get($u);
+		my $html = $res->content;
+		my $charset;
+		if ( ($charset) = $html =~ m!<meta[^<]+?\bcharset=([\w\-]+)"!i ) {
+			$html = decode($charset, $html);
+		}
+
+		$html =~ s!<script.*?>.*?</script.*?>!!gs;
+		$html =~ s!<noscript.*?>.*?</noscript.*?>!!gs;
+		$html =~ s!<style.*?>.*?</style.*?>!!gs;
+		$html =~ s!<frame.*?>.*?</frame.*?>!!gs;
+		$html =~ s!<iframe.*?>.*?</iframe.*?>!!gs;
+
+		open F, ">:utf8", $filename;
+		print F $html;
+	}
 }
 
 sub _init {
@@ -40,52 +71,33 @@ sub _init {
 
 	if ( eval{ $_->isa( 'URI' ) } ) {
 		$self->{base_uri} = $_;
+		$self->{html} = _fetch_uri($_);
 	} else {
+		$self->{html} = $_;
 		$self->{base_uri} = shift;
 	}
 
-	my $k = md5_hex($self->{base_uri});
-	my $filename = "$CACHEDIR/$k.html";
-	my $html;
-	if ( -e $filename ) {
-		open F, "<:utf8", $filename;
-		$html = join "", <F>;
-	} else {
-		my $res = $ua->get($self->{base_uri});
-		my $html = $res->content;
-		my $charset;
-		if ( ($charset) = $html =~ m!<meta[^<]+?\bcharset=([\w\-]+)"!i ) {
-			$html = decode($charset, $html);
-		}
-
-		$html =~ s!<script.*?>.*?</script.*?>!!gs;
-		$html =~ s!<style.*?>.*?</style.*?>!!gs;
-		$html =~ s!<frame.*?>.*?</frame.*?>!!gs;
-		$html =~ s!<iframe.*?>.*?</iframe.*?>!!gs;
-
-		open F, ">:utf8", $filename;
-		print F $html;
-	}
-	
-	$self->_parse($html);
+	$self->_parse;
 
 	$self;
 }
 
 sub _parse {
 	my $self = shift;
-	my $html = shift;
-
-	$html = $self->{html} = lc $html;
 
 	my $parser = XML::LibXML->new();
 	$parser->recover(1);
 	$parser->recover_silently(1);
 	$parser->keep_blanks(0);
 	$parser->expand_entities(1);
+
+	my $html = $self->{html};
 	$self->{doc} = eval {
+		#$html = decode('utf-8', $html);
+		#$html = encode('utf-8', $html);
 		$parser->parse_html_string($html);
 	};
+	print $@;
 }
 
 sub detect_language {
@@ -97,16 +109,34 @@ sub detect_language {
 		'chinese_simple-utf8'	=> 'cn',
 		'chinese_ZH-utf8'		=> 'cn-ZH'
 	};
+	my @langs = keys %$shorten;
 
-	@_ = Lingua::LanguageGuesser
-		->guess($self->{html})
-		->eliminate()
-		->suspect( keys %$shorten )
-		->result_list();
-	my $lang = shift;
+	my $text = $self->{html};
+	#$text = substr($text, 0, 4096);
+	$text =~ s/<[a-z][^>]*?>/ /sg;
+
+	my $lang;
+
+	if ( 0 ) {
+
+		@_ = Lingua::LanguageGuesser
+			->guess($text)
+			->eliminate()
+			->suspect( @langs )
+			->result_list();
+		$lang = shift;
+
+	} else {
+		if ( $text =~ /の/ ) {
+			$lang = 'japanese-utf8';
+		} elsif ( 1 ) {
+			$lang = 'english';
+		}
+	}
+
+	#warn "lang: $lang\n";
 
 	$self->{lang} = $shorten->{$lang};
-
 }
 
 sub _anchors {
@@ -128,16 +158,16 @@ sub get_rules {
 	my $self = shift;
 
 	my $common_rules = {
-		qq{descendant::text()[contains(., "$RAQUO")]} => 2,
-		qq{descendant::text()[contains(., "$LAQUO")]} => 1,
-		q{ descendant::text()[contains(., ">")]} => 2,
-		q{ descendant::text()[contains(., "<")]} => 1,
-		q{ descendant::text()[contains(., ">>")]} => 5,
-		q{ descendant::text()[contains(., "<<")]} => 2,
+		qq{descendant::text()[contains(., "$RAQUO")]} => 4,
+		qq{descendant::text()[contains(., "$LAQUO")]} => 2,
+		q{ descendant::text()[contains(., ">")]} => 5,
+		q{ descendant::text()[contains(., "<")]} => 3,
+		q{ descendant::text()[contains(., ">>")]} => 0.5,
+		q{ descendant::text()[contains(., "<<")]} => 0.5,
 		q{ ancestor-or-self::*[contains(@class,"next")]} => 5,
 		q{ ancestor-or-self::*[contains(@id,"next")]} => 5,
-		q{ ancestor-or-self::*[contains(@class,"old")]} => 5,
-		q{ ancestor-or-self::*[contains(@id,"old")]} => 5,
+		q{ ancestor-or-self::*[contains(@class,"old")]} => {score => 5, attr => 'class', word => 'old'},
+		q{ ancestor-or-self::*[contains(@id,"old")]} => {score => 5, attr => 'id', word => 'old'},
 		q{ contains(@href,'page=')} => 2,
 		q{ descendant::img[contains(@src,'next')]} => {score => 4, img => 1},
 		q{ descendant::img[contains(@src,'old')]} => {score => 2, img => 1},
@@ -155,15 +185,15 @@ sub get_rules {
 			q{ descendant::text()[contains(., "comment")]} => 1/10,
 		},
 		ja => {
-			q{//a[contains(descendant::text(), "→")]} => 4,
-			q{//a[contains(descendant::text(), "最")]} => 1/10,
-			q{//a[contains(descendant::text(), "次")]} => 2,
-			q{//a[contains(descendant::text(), "次の")]} => 5,
+			q{ descendant::text()[contains(., "→")]} => 4,
+			q{ descendant::text()[contains(., "最")]} => 1/10,
+			q{ descendant::text()[contains(., "次")]} => 2,
+			q{ descendant::text()[contains(., "次の")]} => 5,
 
-			q{//a[contains(descendant::text(), "next")]} => 10,
-			q{//a[contains(descendant::text(), "次へ")]} => 5,
-			q{//a[contains(descendant::text(), "次のページ")]} => 5,
-			q{//a[contains(descendant::text(), "old")]} => 5,
+			q{ descendant::text()[contains(., "next")]} => 10,
+			q{ descendant::text()[contains(., "次へ")]} => 5,
+			q{ descendant::text()[contains(., "次のページ")]} => 5,
+			q{ descendant::text()[contains(., "old")]} => 5,
 		}
 	};
 
@@ -182,7 +212,6 @@ sub _keyword_based_filter {
 	my $filter = $klass->new;
 
 	$filter->score($candidates);
-
 }
 
 sub _structure_based_filter {
@@ -220,7 +249,11 @@ sub _structure_based_filter {
 						my $regex = quotemeta $_;
 						if ( $value =~ m/$regex/i ) {
 							my $factor = $definition->{penalty};
-							print "$_ got penalty. $filtername $factor\n";
+
+							if ( $self->{opts}->{debug} > 1 ) {
+								print STDERR "$_ got penalty. $filtername $factor\n";
+							}
+							#$candidate->{'@' . $attr} = 1;
 							$candidate->{score} *= $factor;
 						}
 						last;
@@ -242,44 +275,93 @@ sub find_candidates {
 
 	my $scores = {};
 
-	foreach my $expression (keys %$rules) {
+	my @keys = keys %$rules;
+
+	#print STDERR (scalar @keys) . " rules defined.\n";
+
+	foreach my $expression (@keys) {
+		my $rule = $rules->{$expression};
+		if ( ref $rule ne 'HASH' ) {
+			my $n = $rule;
+			$rule = {score => $n};
+		}
+
 		push @candidates, map {
-			my $rule = $rules->{$expression};
-			my $score = $scores->{"$_"} || 1;
+			my $node = $_->{node};
+			my $score = $scores->{"$node"} || 1;
 
-			$score *= ( ref $rule eq 'HASH' ) ?  $rule->{score} : $rule;
+			$score *=  $rule->{score};
+			$scores->{"$node"} = $score; 
 
-			$scores->{"$_"} = $score; 
-
-#			print "**$expression**";
-#			print "\n";
-#			print $score;
-#			print "\t";
-#			print $_->textContent;
-#			print "\n";
-
+			# print "**$expression**";
+			# print "\n";
+			# print $score;
+			# print "\t";
+			# print $_->textContent;
+			# print "\n";
+			
 			{
-				node => $_,
+				node => $node,
 				score => $score,
 				rule => $rule,
+				rs => $_->{rs},
 			# for debugging.
 				expression => $expression,
-				text => $_->textContent
+				text => $node->textContent
 			};
-		} grep {
-			$_->find($expression);
+		} map {
+			my $rs = $_->find($expression);
+			($rs ? ({ rs => $rs, node => $_ }) : ());
 		} @$anchors;
 	}
 
+	$self->_precise_markup_filter(\@candidates);
 	$self->_structure_based_filter(\@candidates);
 	$self->_keyword_based_filter(\@candidates);
 
 	return \@candidates;
 }
+
+sub _precise_markup_filter {
+	my $self = shift;
+	my $candidates = shift;
+	
+	foreach  ( @$candidates ) {
+		# precise check for some words which are subject to be included other words.
+		if ( $_->{rs} and $_->{rule}->{word} ) {
+			while ( my $node = $_->{rs}->shift ) {
+				my $attr = $_->{rule}->{attr} or next;
+				my $value = $node->getAttribute($attr);
+
+				$value =~ s/[^a-z]/_/gi;
+				if ( $value =~ /^([A-Z]+|[a-z]+)$/ ) {
+					# TODO: implement dictionary based filter.
+				} else {
+					$value =~ s/([A-Z][a-z]+)/' ' . lc($1)/ge;
+				}
+
+				my $meta = quotemeta $_->{rule}->{word};
+				
+				#print "$attr = $value /$meta/\n";
+
+				( $value =~ /\b$meta\b/ ) and next;
+
+				$_->{rule}->{score} *= 0.1;
+				last;
+			}
+		}
+	}
+}
+
 sub mostPromising {
 	my $self = shift;
 	
 	my $candidates = $self->find_candidates;
+
+	if ( $self->{opts}->{debug} ) {
+		print YAML::Dump $candidates;
+	}
+
 	@_ = sort {
 		$a->{score} < $b->{score}
 	} @$candidates;
@@ -288,9 +370,7 @@ sub mostPromising {
 }
 sub nextLink {
 	my $self = shift;
-	my $url = shift;
-
-	$self->_init($url);
+	$self->_init(@_);
 
 	$self->detect_language;
 	my $candidate = $self->mostPromising;

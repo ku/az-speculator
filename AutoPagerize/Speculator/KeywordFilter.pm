@@ -9,4 +9,12 @@ sub new {
 	$self;
 }
 
+sub score {
+	my $self = shift;
+	my $candidates = shift;
+
+	foreach my $candidate (@$candidates) {
+		$self->_score($candidate);
+	}
+}
 1;
