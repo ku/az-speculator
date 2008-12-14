@@ -44,7 +44,7 @@ if ( $u ) {
 	my $az = AutoPagerize->new;
 	$az->testAll({
 		disableCache => 0,
-		debug => 2,
+		debug => 1,
 		set_result => 1,
 	});
 }

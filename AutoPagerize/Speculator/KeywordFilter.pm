@@ -11,10 +11,21 @@ sub new {
 
 sub score {
 	my $self = shift;
-	my $candidates = shift;
+	my $candidate = shift;
 
-	foreach my $candidate (@$candidates) {
-		$self->_score($candidate);
+	my $text = $candidate->{node}->textContent ;
+
+print "text: $text\n";
+	if ( $text =~ /^\s*(\d+)\s*$/ ) {
+print "  N: *$1*\n";
+		if ( $1 == 1 ) {
+			 #the label text of nextLink cant be "1" .
+			return 0.5;
+		} else {
+			return 2;
+		}
 	}
+
+	return $self->_score($candidate);
 }
 1;

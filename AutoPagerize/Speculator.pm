@@ -13,6 +13,8 @@ use Digest::MD5  qw(md5 md5_hex md5_base64);
 use URI;
 use utf8;
 
+use List::Util;
+
 use Encode;
 use AutoPagerize::Speculator::KeywordFilter::En;
 use AutoPagerize::Speculator::KeywordFilter::Ja;
@@ -21,6 +23,7 @@ my $CACHEDIR = "./cache";
 
 my $ua = AutoPagerize::Utils::ua;
 
+#@accesskey="n"]
 
 my $RAQUO = '»';
 my $LAQUO = '«';
@@ -69,6 +72,8 @@ sub _init {
 	my $self = shift;
 	$_ = shift;
 
+	$self->{scores} = {};
+
 	if ( eval{ $_->isa( 'URI' ) } ) {
 		$self->{base_uri} = $_;
 		$self->{html} = _fetch_uri($_);
@@ -92,11 +97,18 @@ sub _parse {
 	$parser->expand_entities(1);
 
 	my $html = $self->{html};
+
+	if ( $self->{opts}->{debug} > 1 ) {
+		open F, ">:utf8", "t.html";
+		print F $html;
+	}
+
 	$self->{doc} = eval {
 		#$html = decode('utf-8', $html);
 		#$html = encode('utf-8', $html);
 		$parser->parse_html_string($html);
 	};
+
 	print $@;
 }
 
@@ -127,7 +139,7 @@ sub detect_language {
 		$lang = shift;
 
 	} else {
-		if ( $text =~ /の/ ) {
+		if ( $text =~ /[あ-んア-ン]/ ) {
 			$lang = 'japanese-utf8';
 		} elsif ( 1 ) {
 			$lang = 'english';
@@ -162,15 +174,21 @@ sub get_rules {
 		qq{descendant::text()[contains(., "$LAQUO")]} => 2,
 		q{ descendant::text()[contains(., ">")]} => 5,
 		q{ descendant::text()[contains(., "<")]} => 3,
-		q{ descendant::text()[contains(., ">>")]} => 0.5,
-		q{ descendant::text()[contains(., "<<")]} => 0.5,
+#		q{ descendant::text()[contains(., ">>")]} => 4,
+#		q{ descendant::text()[contains(., "<<")]} => 2,
+		q{ ancestor-or-self::*[contains(@class,"current")]} => 0.9,
+		q{ ancestor-or-self::*[contains(@id,"current")]} => 0.9,
 		q{ ancestor-or-self::*[contains(@class,"next")]} => 5,
 		q{ ancestor-or-self::*[contains(@id,"next")]} => 5,
-		q{ ancestor-or-self::*[contains(@class,"old")]} => {score => 5, attr => 'class', word => 'old'},
-		q{ ancestor-or-self::*[contains(@id,"old")]} => {score => 5, attr => 'id', word => 'old'},
-		q{ contains(@href,'page=')} => 2,
+		q{ ancestor-or-self::*[contains(@class,"old")]} => {score => 5, attr => 'class', word =>['old', 'older']},
+		q{ ancestor-or-self::*[contains(@id,"old")]} => {score => 5, attr => 'id', word => ['old', 'older']},
+		q{ contains(@href,'page=')} => 4,
+		q{ contains(@href,'/page/')} => {score => 4, regex => '/page/\d+'},
 		q{ descendant::img[contains(@src,'next')]} => {score => 4, img => 1},
 		q{ descendant::img[contains(@src,'old')]} => {score => 2, img => 1},
+
+		q{ descendant::text()[contains(., "comment")]} => 1/10,
+		q{ descendant::text()[contains(., "next")]} => 10,
 	};
 
 	my $language_depended_rules = {
@@ -182,17 +200,15 @@ sub get_rules {
 			q{ descendant::text()[contains(., "oldest")]} => 1/10,
 			q{ descendant::text()[contains(., "newest")]} => 1/10,
 			q{ descendant::text()[contains(., "last")]} => 1/10,
-			q{ descendant::text()[contains(., "comment")]} => 1/10,
 		},
 		ja => {
-			q{ descendant::text()[contains(., "→")]} => 4,
+			q{ descendant::text()[contains(., "→")]} =>4,
 			q{ descendant::text()[contains(., "最")]} => 1/10,
-			q{ descendant::text()[contains(., "次")]} => 2,
-			q{ descendant::text()[contains(., "次の")]} => 5,
+			q{ descendant::text()[contains(., "次")]} => 5,
+			#q{ descendant::text()[contains(., "次の")]} => 5,
 
-			q{ descendant::text()[contains(., "next")]} => 10,
-			q{ descendant::text()[contains(., "次へ")]} => 5,
-			q{ descendant::text()[contains(., "次のページ")]} => 5,
+			#q{ descendant::text()[contains(., "次へ")]} => 5,
+			#q{ descendant::text()[contains(., "次のページ")]} => 5,
 			q{ descendant::text()[contains(., "old")]} => 5,
 		}
 	};
@@ -200,6 +216,84 @@ sub get_rules {
 	my $rules = {%{$language_depended_rules->{ $self->{lang} }}, %$common_rules};
 	$rules;
 }
+
+sub _host_similarity {
+	my $self = shift;
+	my $url = shift;
+	my $parts = shift;
+	
+	my $u = URI->new( $url );
+	@_ = reverse split m!\.!, $u->host;
+
+	my $factor = 1;
+	my $n = List::Util::max(scalar @_, scalar @$parts);
+	for ( my $i = 0; $i < $n; $i++ ) {
+		if ( $parts->[$i] ne $_[$i] ) {
+			# TODO www consideration.
+			$factor *= 0.4;
+		}
+	}
+	if ( $self->{opts}->{debug} > 1 ) {
+		printf qq"  host: %s %s\n", 
+			join ".", @$parts,
+			$url->host
+		;
+	}
+
+	$factor;
+}
+
+sub _path_similarity {
+	my $self = shift;
+	my $url = shift;
+	my $parts = shift;
+
+	@_ = split m!/+!, URI->new( $url )->path;
+	shift @_;	# fist one is empty.
+
+	my $factor = 1;
+	my $n = List::Util::max(scalar @_, scalar @$parts);
+	for ( my $i = 0; $i < $n; $i++ ) {
+		if ( $parts->[$i] ne $_[$i] ) {
+			if ( $i < @$parts ) {
+				$factor *= 0.95;
+			}
+		}
+	}
+	if ( $self->{opts}->{debug} > 1 ) {
+		printf qq"  path: %s %s\n", 
+			join "/", @$parts,
+			join "/", @_,
+		;
+	}
+	$factor;
+}
+
+sub _url_based_filter {
+	my $self = shift;
+	my $candidates = shift;
+
+
+	my @parts = split m!/+!, URI->new( $self->{base_uri} )->path;
+	my @domain_parts = reverse split m!\.!, URI->new( $self->{base_uri} )->host;
+
+	shift @parts;
+
+	foreach ( @$candidates ) {
+		my $factor = undef;
+		my $url = $_->{url};
+		
+		my $factor = $self->_host_similarity($url, \@domain_parts);
+		if ( $factor >= 1 ) {
+			# in case that host is not match, path cannot be match.
+			# path similarity check make no sence.
+			$factor *= $self->_path_similarity($url, \@parts);
+		}
+		$self->_update_score_with_factor($url, $_->{node}, $factor);
+	}
+}
+
+
 
 sub _keyword_based_filter {
 	my $self = shift;
@@ -211,7 +305,12 @@ sub _keyword_based_filter {
 	my $klass = __PACKAGE__ . "::KeywordFilter::$lang";
 	my $filter = $klass->new;
 
-	$filter->score($candidates);
+
+	foreach ( @$candidates ) {
+		my $url = $_->{url};
+		my $factor = $filter->score($_);
+		$self->_update_score_with_factor($url, $_->{node}, $factor);
+	}
 }
 
 sub _structure_based_filter {
@@ -229,6 +328,8 @@ sub _structure_based_filter {
 			keywords => [qw(
 				navigation
 				pagination
+				paginator
+				pages
 				navi
 				nav
 			)],
@@ -239,22 +340,23 @@ sub _structure_based_filter {
 	foreach my $candidate (@$candidates) {
 		my $node = $candidate->{node};
 		while ( not $node->isa('XML::LibXML::Document') ) {
-# calendar filter.
+# calendar/navigation filter.
 			foreach my $filtername ( keys %$filters ) {
 				my $definition = $filters->{$filtername};
 				my @tests = @{$definition->{keywords}};
 				foreach my $attr( qw(class id) ) {
 					my $value = $node->getAttribute($attr);
-					foreach ( @tests ) {
-						my $regex = quotemeta $_;
+					foreach my $testname ( @tests ) {
+						my $regex = quotemeta $testname;
 						if ( $value =~ m/$regex/i ) {
 							my $factor = $definition->{penalty};
 
 							if ( $self->{opts}->{debug} > 1 ) {
-								print STDERR "$_ got penalty. $filtername $factor\n";
+								#print STDERR "$testname got penalty. $filtername $factor\n";
 							}
 							#$candidate->{'@' . $attr} = 1;
-							$candidate->{score} *= $factor;
+							my $url = $candidate->{url};
+							$self->_update_score_with_factor($url, $node, $factor);
 						}
 						last;
 					}
@@ -273,12 +375,13 @@ sub find_candidates {
 
 	my @candidates = ();
 
-	my $scores = {};
-
 	my @keys = keys %$rules;
 
 	#print STDERR (scalar @keys) . " rules defined.\n";
 
+if ( $self->{opts}->{debug} > 0 ) {
+	print "----- expression based filter\n";
+}
 	foreach my $expression (@keys) {
 		my $rule = $rules->{$expression};
 		if ( ref $rule ne 'HASH' ) {
@@ -287,70 +390,215 @@ sub find_candidates {
 		}
 
 		push @candidates, map {
-			my $node = $_->{node};
-			my $score = $scores->{"$node"} || 1;
+			my $c = $_;
+			my $rs = $c->{rs};
+			my $node = $c->{node};
+			my $url = URI->new_abs($c->{url}, $self->{base_uri});
 
-			$score *=  $rule->{score};
-			$scores->{"$node"} = $score; 
+			if ( $url eq $self->{base_uri} ) {
+				();
+			} else {
+				my $score = 0;
 
-			# print "**$expression**";
-			# print "\n";
-			# print $score;
-			# print "\t";
-			# print $_->textContent;
-			# print "\n";
+				my $valid = 1;
+				if ( $rule->{word} ) {
+					if ( $self->_false_positive_keyword_filter($rs, $rule) ) {
+						print "$c->{url}\n";
+						print "$expression\n";
+						print "false positive!\n";
+						print YAML::Dump $rule;
+						$valid = 0;
+					}
+				}
+				if ( $rule->{regex} ) {
+					my $regex = quotemeta $rule->{regex};
+					$valid = $c->{url} =~ /$regex/;
+				}
+
+				if ( $valid ) {
+					$score = $self->_update_score_with_factor($url, $node, $rule->{score}, $expression);
+				}
+
+				if ( $self->{opts}->{debug} > 2) {
+					print "**$expression**";
+					print "\n";
+					print $score;
+					print "\t";
+					print $url;
+					print "\n";
+					print $c->{node}->textContent;
+					print "\n";
+				}
 			
-			{
-				node => $node,
-				score => $score,
-				rule => $rule,
-				rs => $_->{rs},
-			# for debugging.
-				expression => $expression,
-				text => $node->textContent
-			};
+				{
+					url => $url,
+					node => $node,
+					rule => $rule,
+				# for debugging.
+					expression => $expression,
+					text => $node->textContent
+				};
+			}
 		} map {
-			my $rs = $_->find($expression);
-			($rs ? ({ rs => $rs, node => $_ }) : ());
+			my $a = $_;
+			my $translated_expression = $expression;
+			my $atoz = join "",('a'..'z');
+			my $ATOZ = join "",('A'..'Z');
+			$translated_expression =~ s/contains\s*\((.+?),/contains(translate($1,'$ATOZ','$atoz'),/;
+			my $rs = $a->find($translated_expression);
+			if ( $self->{opts}->{debug} > 2) {
+				print $a->textContent ."$rs $translated_expression\n";;
+			}
+			if ( $rs ) {
+				my $u = $a->getAttribute('href');
+				$u = remove_common_url_param($u);
+				$u ? ({ rs => $rs, node => $a, url => $u }) : ();
+			} else {
+				();
+			}
 		} @$anchors;
 	}
 
-	$self->_precise_markup_filter(\@candidates);
+# candidatesにある同じURLのものをフィルタする。
+# expression basedでは同じURLをフィルタする必要はない。
+# 複数のexpressionにマッチするということはそのぶんnextLinkの特徴を備えている。
+# expression basedでdupeのURLがあると後のフィルタで複数回スコアボーナスがついて不当に高くなる。
+	my $found = {};
+	@candidates = grep {
+		my $u = $_->{url};
+		my $b = not $found->{$u};
+		$found->{$u} = 1;
+		$b;
+	} @candidates;
+
+if ( $self->{opts}->{debug} > 0 ) {
+	print "----- _structure_based_filter\n";
+}
 	$self->_structure_based_filter(\@candidates);
+if ( $self->{opts}->{debug} > 0 ) {
+	print "----- _keyword_based_filter\n";
+}
 	$self->_keyword_based_filter(\@candidates);
+if ( $self->{opts}->{debug} > 0 ) {
+	print "----- _url_based_filter\n";
+}
+	$self->_url_based_filter(\@candidates);
+
+	$self->_set_score_to_candidates(\@candidates);
 
 	return \@candidates;
 }
 
-sub _precise_markup_filter {
+sub _update_score_with_factor {
+	my $self = shift;
+	my $url = shift;
+	my $node = shift;
+	my $factor = shift;
+
+	if ( not $self->{scores}->{$url} ) {
+		$self->{scores}->{$url} = {
+			score => 1,
+			node => $node,
+			sibling => undef
+		};
+	}
+	
+	my $found = 0;
+	my $anchor_info = $self->{scores}->{$url};
+	my $lastOne = $anchor_info;
+	while ( $anchor_info ) {
+		my $a = $anchor_info->{node};
+		if ( $a->isSameNode($node) ) {
+			$found = $anchor_info;
+			last;
+		};
+		$lastOne = $anchor_info;
+		$anchor_info = $anchor_info->{sibling};
+	}
+	if ( not $found ) {
+		$anchor_info = $lastOne->{sibling} = {
+			score => 1,
+			node => $node,
+			sibling => undef
+		};
+	}
+
+	my $score = $anchor_info->{score} ;
+
+	if ( $self->{opts}->{debug} ) {
+		printf "%.2f * %.2f \t$url @_\n", $score, $factor;
+	}
+
+	$anchor_info->{score} = $score * $factor;
+}
+
+sub remove_common_url_param {
+	my $u = shift;
+	$u =~ s/\#.*$//;
+	$u =~ s/PHPSESSID=\w+&?//;
+	$u =~ s/\?$//;
+	$u;
+}
+
+sub _highest_score_in_siblings {
+	my $self = shift;
+	my $url = shift;
+	my $highest = 0;
+
+	my $anchor_info = $self->{scores}->{$url};
+	
+	while ( $anchor_info ) {
+		my $score = $anchor_info->{score};
+		$highest = List::Util::max($highest, $score);
+		$anchor_info = $anchor_info->{sibling};
+	}
+	$highest;
+}
+
+sub _set_score_to_candidates {
 	my $self = shift;
 	my $candidates = shift;
-	
-	foreach  ( @$candidates ) {
-		# precise check for some words which are subject to be included other words.
-		if ( $_->{rs} and $_->{rule}->{word} ) {
-			while ( my $node = $_->{rs}->shift ) {
-				my $attr = $_->{rule}->{attr} or next;
-				my $value = $node->getAttribute($attr);
 
-				$value =~ s/[^a-z]/_/gi;
-				if ( $value =~ /^([A-Z]+|[a-z]+)$/ ) {
-					# TODO: implement dictionary based filter.
-				} else {
-					$value =~ s/([A-Z][a-z]+)/' ' . lc($1)/ge;
-				}
 
-				my $meta = quotemeta $_->{rule}->{word};
-				
-				#print "$attr = $value /$meta/\n";
+	foreach ( @$candidates ) {
+		my $url = $_->{url};
+		delete $_->{rule};
+		my $score = $self->_highest_score_in_siblings($url);
+		$_->{score} = $score;
+	}
+}
 
-				( $value =~ /\b$meta\b/ ) and next;
+sub _false_positive_keyword_filter {
+	my $self = shift;
+	my $rs = shift;
+	my $rule = shift;
 
-				$_->{rule}->{score} *= 0.1;
-				last;
+	# precise check for some words which are subject to be included other words.
+	if ( $rs and $rule->{word} ) {
+		while ( my $node = $rs->shift ) {
+			my $attr = $rule->{attr};
+			$attr or next;
+
+			my $value = $node->getAttribute($attr);
+
+			$value =~ s/[^a-z]/_/gi;
+			if ( $value =~ /^([A-Z]+|[a-z]+)$/ ) {
+				# TODO: implement dictionary based filter.
+			} else {
+				$value =~ s/([A-Z][a-z]+)/' ' . lc($1)/ge;
 			}
+
+			my $words = (ref $rule->{word} eq 'ARRAY') ? $rule->{word} : [$rule->{word}] ;
+
+			my $meta = join "|", map { quotemeta $_ } @$words;
+
+			if ( $value =~ /\b($meta)\b/i ) {
+				return 0;
+			}
+			return 1;
 		}
 	}
+	return 1;
 }
 
 sub mostPromising {
@@ -358,15 +606,16 @@ sub mostPromising {
 	
 	my $candidates = $self->find_candidates;
 
-	if ( $self->{opts}->{debug} ) {
-		print YAML::Dump $candidates;
-	}
-
 	@_ = sort {
 		$a->{score} < $b->{score}
 	} @$candidates;
 
-	shift;
+	my $theOne = $_[0];
+	if ( $self->{opts}->{debug} ) {
+		print "mostPromising:";
+		print YAML::Dump $theOne;;
+	}
+	$theOne;
 }
 sub nextLink {
 	my $self = shift;
@@ -374,12 +623,10 @@ sub nextLink {
 
 	$self->detect_language;
 	my $candidate = $self->mostPromising;
+
 	$candidate or return undef;
 
-	my $relative_path = $candidate->{node}->getAttribute('href');
-	my $u = URI->new_abs($relative_path, $self->{base_uri});
-	$u =~ s/#.*//;
-	$u;
+	$candidate->{url};
 }
 
 

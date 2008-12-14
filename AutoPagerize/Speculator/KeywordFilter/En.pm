@@ -29,23 +29,21 @@ sub new {
 
 sub _score {
 	my $self = shift;
-}
+	my $candidate = shift;
 
-sub score {
-	my $self = shift;
-	my $candidates = shift;
+	my $node = $candidate->{node};
+	my $text = $node->textContent;
 
-	foreach my $candidate (@$candidates) {
-		my $node = $candidate->{node};
-		my $text = $node->textContent;
+	my $factor = 1;
 
-		map {
-			my $v = $dic->{$_};
-			$candidate->{score} *= (($v) ? $v : 0.9);
-		} grep {
-			not /^\d+$/
-		} split /\s+/, $text ;
-	}
+	map {
+		my $v = $dic->{$_};
+		$factor *= (($v) ? $v : 0.9);
+	} grep {
+		not /^\d+$/
+	} split /\s+/, $text ;
+	
+	$factor;
 }
 
 1;
